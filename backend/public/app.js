@@ -12,7 +12,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- ESTADO DA APLICAÇÃO ---
     let userToken = '';
-    const API_URL = 'http://34.41.10.145:3001';
+    // Usa o host atual para as chamadas de API
+    const API_URL = window.location.origin;
 
     // --- FUNÇÕES DE LÓGICA ---
 
