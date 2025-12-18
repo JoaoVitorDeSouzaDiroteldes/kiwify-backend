@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  # --- Banco de Dados / Fila ---
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - kiwify-net
+
+  # --- Backend API ---
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./downloads:/app/downloads
+    depends_on:
+      - redis
+    networks:
+      - kiwify-net
+
+  # --- Worker de Download ---
+  worker:
+    build:
+      context: .
+      dockerfile: ./worker/Dockerfile
+    restart: always
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./downloads:/app/downloads
+    depends_on:
+      - redis
+    networks:
+      - kiwify-net
+
+networks:
+  kiwify-net:
+    driver: bridge
