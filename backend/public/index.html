@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kiwify Downloader & Gallery</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <h1>Kiwify Downloader & Gallery</h1>
+        <p>Baixe e assista seus cursos diretamente da sua VM.</p>
+    </header>
+
+    <main>
+        <section id="downloader-section">
+            <h2>1. Baixar Novos Cursos</h2>
+            <div class="input-group">
+                <input type="text" id="token-input" placeholder="Insira seu Bearer Token da Kiwify aqui">
+                <button id="btn-list-courses">Listar Cursos</button>
+            </div>
+            <div id="courses-list" class="card-container">
+                <!-- Cursos da Kiwify serão renderizados aqui -->
+            </div>
+        </section>
+        
+        <hr>
+
+        <section id="gallery-section">
+            <h2>2. Galeria de Cursos Baixados</h2>
+            <div id="gallery-list" class="card-container">
+                <!-- Cursos baixados serão renderizados aqui -->
+            </div>
+        </section>
+    </main>
+
+    <section id="player-section" style="display: none;">
+        <div class="player-header">
+            <button id="btn-back-to-gallery">&larr; Voltar para Galeria</button>
+            <h2 id="player-title">Nome do Curso</h2>
+        </div>
+        <div class="player-container">
+            <div class="video-wrapper">
+                <video id="player-video" controls>
+                    Seu navegador não suporta vídeos.
+                </video>
+            </div>
+            <div id="player-playlist">
+                <!-- Módulos e aulas serão renderizados aqui -->
+            </div>
+        </div>
+    </section>
+
+    <script src="app.js"></script>
+</body>
+</html>
