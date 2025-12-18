@@ -21,15 +21,37 @@ try {
   console.error('Erro no diagnóstico:', e);
 }
 
+const DOWNLOADS_DIR = path.join(__dirname, '../../downloads');
+const MIGRATIONS_FILE = path.join(DOWNLOADS_DIR, 'migrations.json');
+
+const updateMigrationStatus = (workspaceId, courseId, data) => {
+  if (!workspaceId || !courseId) return;
+  if (!fs.existsSync(MIGRATIONS_FILE)) return;
+  try {
+    const migrations = JSON.parse(fs.readFileSync(MIGRATIONS_FILE, 'utf8'));
+    const index = migrations.findIndex(m => m.workspaceId === workspaceId && m.courseId === courseId);
+    if (index !== -1) {
+      migrations[index] = { ...migrations[index], ...data, updatedAt: new Date().toISOString() };
+      fs.writeFileSync(MIGRATIONS_FILE, JSON.stringify(migrations, null, 2));
+    }
+  } catch (e) {
+    console.error('Erro ao atualizar status da migração:', e);
+  }
+};
+
 const worker = new Worker('download-queue', async job => {
-  // Extrai o nome do curso, suportando tanto o formato transformado quanto o raw da Kiwify
+  const { workspaceId, courseId } = job.data;
   const courseName = job.data.courseName || (job.data.course && job.data.course.name) || 'Curso_Desconhecido';
   
-  console.log(`[Job ${job.id}] Processando download do curso: ${courseName}`);
+  console.log(`[Job ${job.id}] Processando download do curso: ${courseName} (Workspace: ${workspaceId || 'N/A'})`);
   
   const courseNameSafe = courseName.replace(/[^a-zA-Z0-9]/g, '_');
   const tempJsonPath = path.join(__dirname, `../temp/${courseNameSafe}_${job.id}.json`);
-  const outputDir = path.join(__dirname, `../downloads/${courseNameSafe}`);
+  
+  // Define diretório de saída baseado no Workspace se fornecido
+  const outputDir = workspaceId 
+    ? path.join(DOWNLOADS_DIR, `workspaces/${workspaceId}/${courseId || courseNameSafe}`)
+    : path.join(DOWNLOADS_DIR, courseNameSafe);
 
   // 1. Salvar JSON em arquivo temporário
   try {
@@ -76,6 +98,9 @@ const worker = new Worker('download-queue', async job => {
 
       if (code === 0) {
         console.log(`[Job ${job.id}] Download concluído com sucesso!`);
+        if (workspaceId && courseId) {
+          updateMigrationStatus(workspaceId, courseId, { status: 'completed', progress: 100 });
+        }
         resolve();
       } else {
         const errorMsg = `Processo saiu com código ${code}`;
@@ -103,4 +128,8 @@ worker.on('completed', job => {
 
 worker.on('failed', (job, err) => {
   console.error(`[Job ${job.id}] Falhou com erro: ${err.message}`);
+  const { workspaceId, courseId } = job.data;
+  if (workspaceId && courseId) {
+    updateMigrationStatus(workspaceId, courseId, { status: 'error', error: err.message });
+  }
 });
