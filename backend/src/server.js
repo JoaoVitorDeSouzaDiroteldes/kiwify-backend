@@ -32,6 +32,9 @@ app.use(cors(corsOptions));
 
 app.use(express.json());
 
+// Servir frontend estático
+app.use(express.static(path.join(__dirname, '../public')));
+
 // Servir arquivos estáticos da pasta downloads
 app.use('/content', express.static(DOWNLOADS_DIR));
 
