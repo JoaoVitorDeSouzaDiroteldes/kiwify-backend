@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
+const { Storage } = require('@google-cloud/storage');
 
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
@@ -28,7 +29,35 @@ const dbPath = path.join(DOWNLOADS_DIR, 'bridge.db');
 console.log(`Abrindo banco de dados em: ${dbPath}`);
 const db = new Database(dbPath);
 
+const storage = new Storage();
+const BUCKET_NAME = 'kiwify-content-platform';
+
 console.log('Iniciando Worker...');
+
+/**
+ * Faz upload recursivo de uma pasta para o GCS
+ */
+async function uploadFolderToGCS(localPath, remotePrefix) {
+    const files = fs.readdirSync(localPath, { withFileTypes: true });
+    
+    for (const file of files) {
+        const fullLocalPath = path.join(localPath, file.name);
+        const fullRemotePath = `${remotePrefix}/${file.name}`;
+        
+        if (file.isDirectory()) {
+            await uploadFolderToGCS(fullLocalPath, fullRemotePath);
+        } else {
+            console.log(`[GCS] Fazendo upload: ${fullRemotePath}`);
+            await storage.bucket(BUCKET_NAME).upload(fullLocalPath, {
+                destination: fullRemotePath,
+                public: true,
+                metadata: {
+                    cacheControl: 'public, max-age=31536000',
+                }
+            });
+        }
+    }
+}
 
 const updateMigrationStatus = (workspaceId, courseId, data) => {
   if (!workspaceId || !courseId) return;
@@ -103,11 +132,28 @@ const worker = new Worker('download-queue', async job => {
       try { fs.unlinkSync(tempJsonPath); } catch(e) {}
 
       if (code === 0) {
-        console.log(`[Job ${job.id}] Download concluído com sucesso!`);
-        if (workspaceId && courseId) {
-          updateMigrationStatus(workspaceId, courseId, { status: 'completed', progress: 100 });
-        }
-        resolve();
+        console.log(`[Job ${job.id}] Download concluído com sucesso! Iniciando upload para GCS...`);
+        
+        const remotePrefix = workspaceId 
+            ? `workspaces/${workspaceId}/${courseId || courseNameSafe}`
+            : courseNameSafe;
+
+        uploadFolderToGCS(outputDir, remotePrefix)
+            .then(() => {
+                console.log(`[Job ${job.id}] Upload para GCS concluído!`);
+                if (workspaceId && courseId) {
+                    updateMigrationStatus(workspaceId, courseId, { 
+                        status: 'completed', 
+                        progress: 100,
+                        remoteUrl: `https://storage.googleapis.com/${BUCKET_NAME}/${remotePrefix}`
+                    });
+                }
+                resolve();
+            })
+            .catch(err => {
+                console.error(`[Job ${job.id}] Erro no upload para GCS:`, err);
+                reject(err);
+            });
       } else {
         const errorMsg = `Processo saiu com código ${code}`;
         console.error(`[Job ${job.id}] ${errorMsg}`);

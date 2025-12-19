@@ -175,10 +175,10 @@ app.get('/courses/:id/prepare-download', async (req, res) => {
 // Helper para sanitizar nomes de arquivos (deve ser igual ao usado pelo downloader)
 const sanitize = (s) => s ? s.replace(/[^a-zA-Z0-9]/g, '_') : '';
 
-// Rota para listar a galeria de cursos baixados (Com injeção de URL de stream)
+// Rota para listar a galeria de cursos baixados (Com injeção de URL de GCS)
 app.get('/gallery', (req, res) => {
   try {
-    // Agora varremos também a pasta workspaces para encontrar cursos
+    const BUCKET_NAME = 'kiwify-content-platform';
     const workspacesDir = path.join(DOWNLOADS_DIR, 'workspaces');
     const courses = [];
 
@@ -188,18 +188,19 @@ app.get('/gallery', (req, res) => {
         if (fs.existsSync(courseJsonPath)) {
             try {
                 const courseData = JSON.parse(fs.readFileSync(courseJsonPath, 'utf8'));
-                const baseUrl = `https://${req.get('host')}/content/${relativePathBase}`;
+                
+                // URL Base do GCS para este curso
+                const gcsBaseUrl = `https://storage.googleapis.com/${BUCKET_NAME}/${relativePathBase}`;
 
-                // Injeta a URL de stream em cada lição
+                // Injeta a URL de stream do GCS em cada lição
                 if (courseData.course && courseData.course.modules) {
                     courseData.course.modules.forEach(mod => {
                         if (mod.lessons) {
                             mod.lessons.forEach((lesson, lessonIndex) => {
                                 if (lesson.video && lesson.video.name) {
-                                    // Estrutura: /content/workspaceId/courseId/ModuleOrder_ModuleName/LessonOrder_LessonTitle/Video.mp4
                                     const moduleDir = `${mod.order}_${sanitize(mod.name)}`;
                                     const lessonDir = `${lessonIndex}_${sanitize(lesson.title)}`;
-                                    lesson.video.streamUrl = `${baseUrl}/${moduleDir}/${lessonDir}/${lesson.video.name}`;
+                                    lesson.video.streamUrl = `${gcsBaseUrl}/${moduleDir}/${lessonDir}/${lesson.video.name}`;
                                 }
                             });
                         }
