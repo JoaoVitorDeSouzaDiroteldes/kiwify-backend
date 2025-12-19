@@ -48,14 +48,12 @@ app.use(cors({
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Otimização Nginx: Node envia o header e o Nginx serve o arquivo
+// Otimização Nginx: Node envia o header e o Nginx serve o arquivo diretamente (Performance V4)
 app.use('/content', (req, res) => {
-  const filePath = path.join(DOWNLOADS_DIR, req.path);
-  // Se estiver atrás do Nginx configurado com X-Accel, use:
-  // res.setHeader('X-Accel-Redirect', `/internal_downloads${req.path}`);
-  // res.end();
-  // Por enquanto, mantemos o static do Express para compatibilidade direta:
-  express.static(DOWNLOADS_DIR)(req, res);
+  // Traduz a URL pública para o caminho interno do Nginx (X-Accel-Redirect)
+  res.setHeader('X-Accel-Redirect', `/internal_downloads${req.path}`);
+  res.setHeader('Content-Type', 'application/octet-stream'); // Default, Nginx ajustará conforme extensão
+  res.end();
 });
 
 const updateMigrationStatus = (workspaceId, courseId, data) => {
