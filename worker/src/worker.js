@@ -83,7 +83,8 @@ const worker = new Worker('download-queue', async job => {
     }
 
     // Correção: O binário espera argumentos nomeados (--jsonPath e --output)
-    const child = spawn('kiwifyDownload', [
+    // Usando caminho absoluto para evitar ENOENT
+    const child = spawn('/usr/local/bin/kiwifyDownload', [
         `--jsonPath=${tempJsonPath}`, 
         `--output=${outputDir}`
     ]);
