@@ -2,40 +2,29 @@ const { Worker } = require('bullmq');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const Database = require('better-sqlite3');
 
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
+const DOWNLOADS_DIR = path.join(__dirname, '../../downloads');
+
+// Inicialização do SQLite no Worker
+const dbPath = path.join(DOWNLOADS_DIR, 'bridge.db');
+const db = new Database(dbPath);
 
 console.log('Iniciando Worker...');
 
-// Diagnóstico de ambiente na inicialização
-try {
-  const ls = spawn('ls', ['-l', '/usr/local/bin/kiwifyDownload']);
-  ls.stdout.on('data', d => console.log('Check binário:', d.toString().trim()));
-  ls.stderr.on('data', d => console.log('Check binário erro:', d.toString().trim()));
-  
-  const help = spawn('kiwifyDownload', ['--help']);
-  help.stdout.on('data', d => console.log('Check help stdout:', d.toString().trim()));
-  help.stderr.on('data', d => console.log('Check help stderr:', d.toString().trim()));
-} catch (e) {
-  console.error('Erro no diagnóstico:', e);
-}
-
-const DOWNLOADS_DIR = path.join(__dirname, '../../downloads');
-const MIGRATIONS_FILE = path.join(DOWNLOADS_DIR, 'migrations.json');
-
 const updateMigrationStatus = (workspaceId, courseId, data) => {
   if (!workspaceId || !courseId) return;
-  if (!fs.existsSync(MIGRATIONS_FILE)) return;
   try {
-    const migrations = JSON.parse(fs.readFileSync(MIGRATIONS_FILE, 'utf8'));
-    const index = migrations.findIndex(m => m.workspaceId === workspaceId && m.courseId === courseId);
-    if (index !== -1) {
-      migrations[index] = { ...migrations[index], ...data, updatedAt: new Date().toISOString() };
-      fs.writeFileSync(MIGRATIONS_FILE, JSON.stringify(migrations, null, 2));
-    }
+    const stmt = db.prepare(`
+      UPDATE migrations 
+      SET status = ?, progress = ?, error = ?, updatedAt = CURRENT_TIMESTAMP 
+      WHERE workspaceId = ? AND courseId = ?
+    `);
+    stmt.run(data.status, data.progress || 0, data.error || null, workspaceId, courseId);
   } catch (e) {
-    console.error('Erro ao atualizar status da migração:', e);
+    console.error('Erro ao atualizar status no SQLite:', e);
   }
 };
 

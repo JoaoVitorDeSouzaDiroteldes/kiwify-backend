@@ -2,8 +2,10 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-COPY package*.json ./
+# Instala dependências de compilação para better-sqlite3
+RUN apk add --no-cache python3 make g++ 
 
+COPY package*.json ./
 RUN npm install
 
 COPY . .

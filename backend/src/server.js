@@ -2,9 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const Database = require('better-sqlite3');
 const { Queue } = require('bullmq');
 const { listCourses, getCourseSections } = require('./kiwifyClient');
-const { transformKiwifyToDownloaderFormat } = require('./transformer');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -12,58 +12,62 @@ const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
 const DOWNLOADS_DIR = path.join(__dirname, '../../downloads');
 
+// Inicialização do SQLite
+const dbPath = path.join(DOWNLOADS_DIR, 'bridge.db');
+if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+const db = new Database(dbPath);
+
+// Criar tabelas se não existirem
+db.exec(`
+  CREATE TABLE IF NOT EXISTS migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspaceId TEXT,
+    courseId TEXT,
+    courseName TEXT,
+    status TEXT,
+    progress INTEGER DEFAULT 0,
+    localPath TEXT,
+    error TEXT,
+    updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspaceId, courseId)
+  )
+`);
+
 // Configuração da Fila de Download
 const downloadQueue = new Queue('download-queue', {
-  connection: {
-    host: REDIS_HOST,
-    port: REDIS_PORT
-  }
+  connection: { host: REDIS_HOST, port: REDIS_PORT }
 });
 
-// Configuração de CORS explícita
-const corsOptions = {
-  origin: '*', // Permite todas as origens. Para produção, restrinja a domínios específicos.
+// Configuração de CORS
+app.use(cors({
+  origin: '*',
   methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
-  preflightContinue: false,
-  optionsSuccessStatus: 204,
   allowedHeaders: 'Content-Type,Authorization,X-Workspace-Id'
-};
-app.use(cors(corsOptions));
+}));
 
 app.use(express.json());
-
-// Servir frontend estático
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Servir arquivos estáticos da pasta downloads
-app.use('/content', express.static(DOWNLOADS_DIR));
-
-// Persistência simples de migrações
-const MIGRATIONS_FILE = path.join(DOWNLOADS_DIR, 'migrations.json');
-
-const getMigrations = () => {
-  if (!fs.existsSync(MIGRATIONS_FILE)) return [];
-  try {
-    return JSON.parse(fs.readFileSync(MIGRATIONS_FILE, 'utf8'));
-  } catch (e) {
-    return [];
-  }
-};
-
-const saveMigrations = (migrations) => {
-  if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
-  fs.writeFileSync(MIGRATIONS_FILE, JSON.stringify(migrations, null, 2));
-};
+// Otimização Nginx: Node envia o header e o Nginx serve o arquivo
+app.use('/content', (req, res) => {
+  const filePath = path.join(DOWNLOADS_DIR, req.path);
+  // Se estiver atrás do Nginx configurado com X-Accel, use:
+  // res.setHeader('X-Accel-Redirect', `/internal_downloads${req.path}`);
+  // res.end();
+  // Por enquanto, mantemos o static do Express para compatibilidade direta:
+  express.static(DOWNLOADS_DIR)(req, res);
+});
 
 const updateMigrationStatus = (workspaceId, courseId, data) => {
-  const migrations = getMigrations();
-  const index = migrations.findIndex(m => m.workspaceId === workspaceId && m.courseId === courseId);
-  if (index !== -1) {
-    migrations[index] = { ...migrations[index], ...data, updatedAt: new Date().toISOString() };
-  } else {
-    migrations.push({ workspaceId, courseId, ...data, updatedAt: new Date().toISOString() });
-  }
-  saveMigrations(migrations);
+  const stmt = db.prepare(`
+    INSERT INTO migrations (workspaceId, courseId, courseName, status, progress, localPath, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(workspaceId, courseId) DO UPDATE SET
+      status = excluded.status,
+      progress = excluded.progress,
+      updatedAt = CURRENT_TIMESTAMP
+  `);
+  stmt.run(workspaceId, courseId, data.courseName || '', data.status, data.progress || 0, data.localPath || '');
 };
 
 // Middleware para extrair o token
@@ -80,10 +84,11 @@ app.get('/', (req, res) => {
   res.send('Servidor da Kiwify Platform está rodando!');
 });
 
-// Nova Rota de Migração vinculada a Workspace
-app.post('/courses/migrate', async (req, res) => {
+// Rota unificada para suportar ambos os formatos de chamada do frontend
+app.post(['/courses/migrate', '/courses/:id/prepare-download'], async (req, res) => {
   const token = getToken(req);
-  const { courseId, workspaceId } = req.body;
+  const courseId = req.params.id || req.body.courseId;
+  const { workspaceId } = req.body;
 
   if (!token) return res.status(401).json({ error: 'Token não fornecido.' });
   if (!courseId || !workspaceId) return res.status(400).json({ error: 'courseId e workspaceId são obrigatórios.' });
@@ -92,7 +97,6 @@ app.post('/courses/migrate', async (req, res) => {
     const kiwifyData = await getCourseSections(courseId, token);
     const courseName = kiwifyData.course ? kiwifyData.course.name : 'Unknown';
 
-    // Registra início da migração
     updateMigrationStatus(workspaceId, courseId, {
       status: 'downloading',
       progress: 0,
@@ -100,34 +104,22 @@ app.post('/courses/migrate', async (req, res) => {
       localPath: `/content/workspaces/${workspaceId}/${courseId}`
     });
 
-    // Enfileira job com workspaceId
     await downloadQueue.add('download-course', { 
         ...kiwifyData, 
         workspaceId,
-        courseId // Garante o ID para o worker atualizar o status
-    });
-
-    res.json({ 
-        success: true, 
-        message: 'Migração iniciada',
-        workspaceId,
         courseId
     });
+
+    res.json({ success: true, workspaceId, courseId });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Status das migrações do workspace
 app.get('/workspaces/:workspaceId/status', (req, res) => {
   const { workspaceId } = req.params;
-  const allMigrations = getMigrations();
-  const workspaceMigrations = allMigrations.filter(m => m.workspaceId === workspaceId);
-
-  res.json({
-    workspaceId,
-    migrations: workspaceMigrations
-  });
+  const migrations = db.prepare('SELECT * FROM migrations WHERE workspaceId = ?').all(workspaceId);
+  res.json({ workspaceId, migrations });
 });
 
 // Rota para listar os cursos

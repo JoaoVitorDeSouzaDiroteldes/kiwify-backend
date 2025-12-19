@@ -19,8 +19,8 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-# Instala dependências de runtime (ffmpeg é essencial)
-RUN apk add --no-cache ffmpeg python3 py3-pip
+# Instala dependências de runtime (ffmpeg é essencial) e compilação para better-sqlite3
+RUN apk add --no-cache ffmpeg python3 py3-pip make g++
 
 # Copia o binário compilado
 COPY --from=builder /build/src/kiwifyDownload /usr/local/bin/kiwifyDownload
