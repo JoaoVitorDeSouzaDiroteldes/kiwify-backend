@@ -1,9 +1,10 @@
-FROM nimlang/nim:2.0.0-alpine AS builder
+# Usamos a imagem Debian para garantir compatibilidade com a imagem node:slim
+FROM nimlang/nim:2.0.0 AS builder
 
 WORKDIR /build
 
-# Instala dependências de compilação se necessário (ex: openssl)
-RUN apk add --no-cache openssl-dev pcre-dev
+# Instala dependências de compilação
+RUN apt-get update && apt-get install -y libssl-dev libpcre3-dev
 
 # Copia o código fonte do downloader
 COPY ./kiwifyDownload/ .
