@@ -175,7 +175,7 @@ app.get('/courses/:id/prepare-download', async (req, res) => {
 // Helper para sanitizar nomes de arquivos (deve ser igual ao usado pelo downloader)
 const sanitize = (s) => s ? s.replace(/[^a-zA-Z0-9]/g, '_') : '';
 
-// Rota para listar a galeria de cursos baixados (Com injeção de URL de GCS)
+// Rota para listar a galeria de cursos baixados (Com injeção de URL de GCS e status de migração por aula)
 app.get('/gallery', (req, res) => {
   try {
     const BUCKET_NAME = 'kiwify-content-platform';
@@ -192,15 +192,21 @@ app.get('/gallery', (req, res) => {
                 // URL Base do GCS para este curso
                 const gcsBaseUrl = `https://storage.googleapis.com/${BUCKET_NAME}/${relativePathBase}`;
 
-                // Injeta a URL de stream do GCS em cada lição
+                // Injeta a URL de stream do GCS e status de migração em cada lição
                 if (courseData.course && courseData.course.modules) {
                     courseData.course.modules.forEach(mod => {
                         if (mod.lessons) {
                             mod.lessons.forEach((lesson, lessonIndex) => {
-                                if (lesson.video && lesson.video.name) {
-                                    const moduleDir = `${mod.order}_${sanitize(mod.name)}`;
-                                    const lessonDir = `${lessonIndex}_${sanitize(lesson.title)}`;
-                                    lesson.video.streamUrl = `${gcsBaseUrl}/${moduleDir}/${lessonDir}/${lesson.video.name}`;
+                                const moduleDirName = `${mod.order}_${sanitize(mod.name)}`;
+                                const lessonDirName = `${lessonIndex}_${sanitize(lesson.title)}`;
+                                const lessonLocalPath = path.join(dirPath, moduleDirName, lessonDirName);
+                                
+                                // Verifica se a aula foi migrada com sucesso (presença do .uploaded)
+                                const isMigrated = fs.existsSync(path.join(lessonLocalPath, '.uploaded'));
+                                lesson.isMigrated = isMigrated;
+
+                                if (isMigrated && lesson.video && lesson.video.name) {
+                                    lesson.video.streamUrl = `${gcsBaseUrl}/${moduleDirName}/${lessonDirName}/${lesson.video.name}`;
                                 }
                             });
                         }

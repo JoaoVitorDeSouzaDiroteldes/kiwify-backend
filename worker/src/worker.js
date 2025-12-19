@@ -1,4 +1,4 @@
-const { Worker } = require('bullmq');
+const { Worker, Queue } = require('bullmq');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -34,29 +34,51 @@ const BUCKET_NAME = 'kiwify-content-platform';
 
 console.log('Iniciando Worker...');
 
+const downloadQueue = new Queue('download-queue', { connection: { host: REDIS_HOST, port: REDIS_PORT } });
+
+async function clearStaleJobs() {
+  try {
+    console.log('Limpando a fila de downloads para remover jobs antigos...');
+    await downloadQueue.clean(0, 'active');
+    await downloadQueue.clean(0, 'wait');
+    await downloadQueue.clean(0, 'paused');
+    console.log('Fila limpa com sucesso.');
+  } catch (e) {
+    console.error('Erro ao limpar a fila:', e);
+  }
+}
+
 /**
- * Faz upload recursivo de uma pasta para o GCS
+ * Faz upload recursivo de uma pasta para o GCS. Retorna uma promessa.
  */
-async function uploadFolderToGCS(localPath, remotePrefix) {
-    const files = fs.readdirSync(localPath, { withFileTypes: true });
-    
-    for (const file of files) {
-        const fullLocalPath = path.join(localPath, file.name);
-        const fullRemotePath = `${remotePrefix}/${file.name}`;
-        
-        if (file.isDirectory()) {
-            await uploadFolderToGCS(fullLocalPath, fullRemotePath);
-        } else {
-            console.log(`[GCS] Fazendo upload: ${fullRemotePath}`);
-            await storage.bucket(BUCKET_NAME).upload(fullLocalPath, {
-                destination: fullRemotePath,
-                public: true,
-                metadata: {
-                    cacheControl: 'public, max-age=31536000',
-                }
-            });
+function uploadFolderToGCS(localPath, remotePrefix) {
+    return new Promise((resolve, reject) => {
+        if (!fs.existsSync(localPath)) {
+            console.warn(`[GCS] Diretório local não encontrado para upload: ${localPath}`);
+            return resolve(); // Resolve para não quebrar a cadeia se a pasta não existir
         }
-    }
+
+        const files = fs.readdirSync(localPath, { withFileTypes: true });
+        const uploadPromises = files.map(file => {
+            const fullLocalPath = path.join(localPath, file.name);
+            const fullRemotePath = `${remotePrefix}/${file.name}`;
+            
+            if (file.isDirectory()) {
+                return uploadFolderToGCS(fullLocalPath, fullRemotePath);
+            } else {
+                console.log(`[GCS] Fazendo upload: ${fullRemotePath}`);
+                return storage.bucket(BUCKET_NAME).upload(fullLocalPath, {
+                    destination: fullRemotePath,
+                    public: true,
+                    metadata: {
+                        cacheControl: 'public, max-age=31536000',
+                    }
+                });
+            }
+        });
+
+        Promise.all(uploadPromises).then(resolve).catch(reject);
+    });
 }
 
 const updateMigrationStatus = (workspaceId, courseId, data) => {
@@ -120,25 +142,57 @@ const worker = new Worker('download-queue', async job => {
     
     let totalLessons = 0;
     let completedLessons = 0;
+    let currentModuleDir = '';
+    let previousLessonDir = '';
+
+    const escapeFs = (s) => s ? s.replace(/[^a-zA-Z0-9.\-]/g, '_') : '';
 
     // Tenta estimar o total de lições do job data
     if (job.data.course && job.data.course.modules) {
       totalLessons = job.data.course.modules.reduce((acc, mod) => acc + (mod.lessons ? mod.lessons.length : 0), 0);
     }
+    
+    const triggerIncrementalUpload = () => {
+        if (currentModuleDir && previousLessonDir) {
+            const lessonPathToUpload = path.join(outputDir, currentModuleDir, previousLessonDir);
+            const courseRemoteDir = workspaceId 
+                ? `workspaces/${workspaceId}/${courseId || courseNameSafe}`
+                : courseNameSafe;
+            const remotePrefix = `${courseRemoteDir}/${currentModuleDir}/${previousLessonDir}`;
+            
+            console.log(`[UPLOAD INCREMENTAL] Upload da lição anterior: ${remotePrefix}`);
+            uploadFolderToGCS(lessonPathToUpload, remotePrefix)
+                .then(() => {
+                    fs.writeFileSync(path.join(lessonPathToUpload, '.uploaded'), 'true');
+                    console.log(`[UPLOAD INCREMENTAL] Sucesso para: ${remotePrefix}`);
+                })
+                .catch(err => console.error(`[UPLOAD INCREMENTAL] Falha para: ${remotePrefix}`, err));
+        }
+    };
 
     child.stdout.on('data', (data) => {
-      const output = data.toString();
-      console.log(`[Job ${job.id}]: ${output.trim()}`);
-      
-      // Monitora progresso por mensagens do binário (heurística baseada no log)
-      if (output.includes('Starting download of')) {
-          // Incrementa progresso logico
-          completedLessons++;
-          if (totalLessons > 0) {
-              const progress = Math.min(Math.round((completedLessons / totalLessons) * 90), 95); // Reserva 5% para o upload
-              updateMigrationStatus(workspaceId, courseId, { status: 'downloading', progress });
-          }
-      }
+        const output = data.toString();
+        console.log(`[Job ${job.id}]: ${output.trim()}`);
+
+        const moduleMatch = output.match(/Module '(.+)'/);
+        if (moduleMatch) {
+            triggerIncrementalUpload(); // Upload a última aula do módulo anterior
+            currentModuleDir = moduleMatch[1];
+            previousLessonDir = '';
+        }
+
+        const lessonMatch = output.match(/Starting download of '(.+)'/);
+        if (lessonMatch) {
+            triggerIncrementalUpload(); // Upload da aula anterior
+            previousLessonDir = lessonMatch[1];
+            
+            // Atualiza progresso
+            completedLessons++;
+            if (totalLessons > 0) {
+                const progress = Math.min(Math.round((completedLessons / totalLessons) * 95), 95);
+                updateMigrationStatus(workspaceId, courseId, { status: 'downloading', progress });
+            }
+        }
     });
 
     child.stderr.on('data', (data) => {
@@ -150,35 +204,33 @@ const worker = new Worker('download-queue', async job => {
     });
 
     child.on('close', (code) => {
-      // Limpar arquivo temp JSON após execução
       try { fs.unlinkSync(tempJsonPath); } catch(e) {}
 
       if (code === 0) {
-        console.log(`[Job ${job.id}] Download concluído com sucesso! Iniciando upload para GCS...`);
+        console.log(`[Job ${job.id}] Processo de download finalizado.`);
+        // Dispara o upload da última aula processada
+        triggerIncrementalUpload();
         
-        const remotePrefix = workspaceId 
-            ? `workspaces/${workspaceId}/${courseId || courseNameSafe}`
-            : courseNameSafe;
+        // Dá um pequeno tempo para o último upload ser registrado antes de finalizar.
+        setTimeout(() => {
+            console.log(`[Job ${job.id}] Migração concluída.`);
+            if (workspaceId && courseId) {
+                const remotePrefix = workspaceId ? `workspaces/${workspaceId}/${courseId || courseNameSafe}` : courseNameSafe;
+                updateMigrationStatus(workspaceId, courseId, { 
+                    status: 'completed', 
+                    progress: 100,
+                    remoteUrl: `https://storage.googleapis.com/${BUCKET_NAME}/${remotePrefix}`
+                });
+            }
+            resolve();
+        }, 5000); // Espera 5 segundos
 
-        uploadFolderToGCS(outputDir, remotePrefix)
-            .then(() => {
-                console.log(`[Job ${job.id}] Upload para GCS concluído!`);
-                if (workspaceId && courseId) {
-                    updateMigrationStatus(workspaceId, courseId, { 
-                        status: 'completed', 
-                        progress: 100,
-                        remoteUrl: `https://storage.googleapis.com/${BUCKET_NAME}/${remotePrefix}`
-                    });
-                }
-                resolve();
-            })
-            .catch(err => {
-                console.error(`[Job ${job.id}] Erro no upload para GCS:`, err);
-                reject(err);
-            });
       } else {
-        const errorMsg = `Processo saiu com código ${code}`;
+        const errorMsg = `Processo de download saiu com código ${code}`;
         console.error(`[Job ${job.id}] ${errorMsg}`);
+        if (workspaceId && courseId) {
+            updateMigrationStatus(workspaceId, courseId, { status: 'error', error: errorMsg });
+        }
         reject(new Error(errorMsg));
       }
     });
@@ -194,6 +246,11 @@ const worker = new Worker('download-queue', async job => {
     host: REDIS_HOST,
     port: REDIS_PORT
   }
+});
+
+// Limpa a fila ao iniciar e então começa a escutar por jobs
+clearStaleJobs().then(() => {
+    console.log('Worker pronto para processar jobs.');
 });
 
 worker.on('completed', job => {
