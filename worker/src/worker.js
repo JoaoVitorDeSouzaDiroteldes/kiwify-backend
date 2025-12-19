@@ -118,13 +118,35 @@ const worker = new Worker('download-queue', async job => {
         `--output=${outputDir}`
     ]);
     
+    let totalLessons = 0;
+    let completedLessons = 0;
+
+    // Tenta estimar o total de lições do job data
+    if (job.data.course && job.data.course.modules) {
+      totalLessons = job.data.course.modules.reduce((acc, mod) => acc + (mod.lessons ? mod.lessons.length : 0), 0);
+    }
+
     child.stdout.on('data', (data) => {
-      console.log(`[Job ${job.id}]: ${data.toString().trim()}`);
+      const output = data.toString();
+      console.log(`[Job ${job.id}]: ${output.trim()}`);
+      
+      // Monitora progresso por mensagens do binário (heurística baseada no log)
+      if (output.includes('Starting download of')) {
+          // Incrementa progresso logico
+          completedLessons++;
+          if (totalLessons > 0) {
+              const progress = Math.min(Math.round((completedLessons / totalLessons) * 90), 95); // Reserva 5% para o upload
+              updateMigrationStatus(workspaceId, courseId, { status: 'downloading', progress });
+          }
+      }
     });
 
     child.stderr.on('data', (data) => {
-      // O ffmpeg e o downloader podem usar stderr para logs normais, então logamos mas não tratamos como erro fatal imediato
-      console.log(`[Job ${job.id} LOG]: ${data.toString().trim()}`);
+      const output = data.toString();
+      // O ffmpeg e o downloader podem usar stderr para logs normais
+      if (!output.includes('frame=') && !output.includes('bitrate=')) {
+          console.log(`[Job ${job.id} LOG]: ${output.trim()}`);
+      }
     });
 
     child.on('close', (code) => {

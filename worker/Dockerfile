@@ -21,7 +21,7 @@ FROM node:20-slim
 WORKDIR /app
 
 # Instala dependências de runtime e compilação
-RUN apt-get update && apt-get install -y ffmpeg python3 python3-pip make g++
+RUN apt-get update && apt-get install -y ffmpeg wget python3 python3-pip make g++
 
 # Copia o binário compilado
 COPY --from=builder /build/src/kiwifyDownload /usr/local/bin/kiwifyDownload
