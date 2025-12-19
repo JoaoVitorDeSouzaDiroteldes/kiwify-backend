@@ -6,10 +6,26 @@ const Database = require('better-sqlite3');
 
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
-const DOWNLOADS_DIR = path.join(__dirname, '../../downloads');
 
-// Inicialização do SQLite no Worker
+// Caminho absoluto para o diretório de downloads no Docker
+const DOWNLOADS_DIR = '/app/downloads';
+
+console.log(`Configurando diretório de downloads: ${DOWNLOADS_DIR}`);
+
+// Garante que o diretório existe antes de tentar abrir o banco
+try {
+  if (!fs.existsSync(DOWNLOADS_DIR)) {
+    console.log(`Criando diretório de downloads: ${DOWNLOADS_DIR}`);
+    fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+  } else {
+    console.log(`Diretório de downloads já existe: ${DOWNLOADS_DIR}`);
+  }
+} catch (e) {
+  console.error(`Erro ao criar diretório ${DOWNLOADS_DIR}:`, e);
+}
+
 const dbPath = path.join(DOWNLOADS_DIR, 'bridge.db');
+console.log(`Abrindo banco de dados em: ${dbPath}`);
 const db = new Database(dbPath);
 
 console.log('Iniciando Worker...');

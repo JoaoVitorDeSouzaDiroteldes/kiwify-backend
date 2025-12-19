@@ -10,11 +10,19 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
-const DOWNLOADS_DIR = path.join(__dirname, '../../downloads');
+
+// Caminho absoluto para downloads no Docker
+const DOWNLOADS_DIR = '/app/downloads';
 
 // Inicialização do SQLite
+if (!fs.existsSync(DOWNLOADS_DIR)) {
+    try {
+        fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+    } catch (e) {
+        console.error('Erro ao criar diretório downloads:', e);
+    }
+}
 const dbPath = path.join(DOWNLOADS_DIR, 'bridge.db');
-if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 const db = new Database(dbPath);
 
 // Criar tabelas se não existirem
