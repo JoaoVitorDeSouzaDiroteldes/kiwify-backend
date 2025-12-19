@@ -69,7 +69,6 @@ function uploadFolderToGCS(localPath, remotePrefix) {
                 console.log(`[GCS] Fazendo upload: ${fullRemotePath}`);
                 return storage.bucket(BUCKET_NAME).upload(fullLocalPath, {
                     destination: fullRemotePath,
-                    public: true,
                     metadata: {
                         cacheControl: 'public, max-age=31536000',
                     }
