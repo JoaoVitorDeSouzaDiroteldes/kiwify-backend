@@ -172,35 +172,75 @@ app.get('/courses/:id/prepare-download', async (req, res) => {
   }
 });
 
-// Rota para listar a galeria de cursos baixados
+// Helper para sanitizar nomes de arquivos (deve ser igual ao usado pelo downloader)
+const sanitize = (s) => s ? s.replace(/[^a-zA-Z0-9]/g, '_') : '';
+
+// Rota para listar a galeria de cursos baixados (Com injeção de URL de stream)
 app.get('/gallery', (req, res) => {
   try {
-    if (!fs.existsSync(DOWNLOADS_DIR)) {
-      return res.json([]);
-    }
-
-    const entries = fs.readdirSync(DOWNLOADS_DIR, { withFileTypes: true });
+    // Agora varremos também a pasta workspaces para encontrar cursos
+    const workspacesDir = path.join(DOWNLOADS_DIR, 'workspaces');
     const courses = [];
 
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        const courseJsonPath = path.join(DOWNLOADS_DIR, entry.name, 'course.json');
+    // Função auxiliar para processar um diretório de curso
+    const processCourseDir = (dirPath, relativePathBase) => {
+        const courseJsonPath = path.join(dirPath, 'course.json');
         if (fs.existsSync(courseJsonPath)) {
-          try {
-            const courseData = JSON.parse(fs.readFileSync(courseJsonPath, 'utf8'));
-            // Adiciona o caminho relativo para a capa e metadados
-            // Assumindo que a capa original é uma URL, mantemos. 
-            // O front pode decidir se usa a URL remota ou se implementamos download de capa depois.
-            // Para simplificar, retornamos a estrutura completa.
-            courses.push({
-              dirName: entry.name,
-              ...courseData
-            });
-          } catch (e) {
-            console.error(`Erro ao ler course.json de ${entry.name}`, e);
-          }
+            try {
+                const courseData = JSON.parse(fs.readFileSync(courseJsonPath, 'utf8'));
+                const baseUrl = `https://${req.get('host')}/content/${relativePathBase}`;
+
+                // Injeta a URL de stream em cada lição
+                if (courseData.course && courseData.course.modules) {
+                    courseData.course.modules.forEach(mod => {
+                        if (mod.lessons) {
+                            mod.lessons.forEach((lesson, lessonIndex) => {
+                                if (lesson.video && lesson.video.name) {
+                                    // Estrutura: /content/workspaceId/courseId/ModuleOrder_ModuleName/LessonOrder_LessonTitle/Video.mp4
+                                    const moduleDir = `${mod.order}_${sanitize(mod.name)}`;
+                                    const lessonDir = `${lessonIndex}_${sanitize(lesson.title)}`;
+                                    lesson.video.streamUrl = `${baseUrl}/${moduleDir}/${lessonDir}/${lesson.video.name}`;
+                                }
+                            });
+                        }
+                    });
+                }
+                
+                courses.push({
+                    dirName: relativePathBase,
+                    ...courseData
+                });
+            } catch (e) {
+                console.error(`Erro ao processar curso em ${dirPath}`, e);
+            }
         }
-      }
+    };
+
+    // 1. Processar cursos na raiz (legado)
+    if (fs.existsSync(DOWNLOADS_DIR)) {
+        const entries = fs.readdirSync(DOWNLOADS_DIR, { withFileTypes: true });
+        for (const entry of entries) {
+            if (entry.isDirectory() && entry.name !== 'workspaces') {
+                processCourseDir(path.join(DOWNLOADS_DIR, entry.name), entry.name);
+            }
+        }
+    }
+
+    // 2. Processar cursos dentro de workspaces
+    if (fs.existsSync(workspacesDir)) {
+        const workspaceEntries = fs.readdirSync(workspacesDir, { withFileTypes: true });
+        for (const wsEntry of workspaceEntries) {
+            if (wsEntry.isDirectory()) {
+                const wsPath = path.join(workspacesDir, wsEntry.name);
+                const courseEntries = fs.readdirSync(wsPath, { withFileTypes: true });
+                for (const courseEntry of courseEntries) {
+                    if (courseEntry.isDirectory()) {
+                         // relativePathBase ex: workspaces/uuid/kiw_123
+                         processCourseDir(path.join(wsPath, courseEntry.name), `workspaces/${wsEntry.name}/${courseEntry.name}`);
+                    }
+                }
+            }
+        }
     }
 
     res.json(courses);
