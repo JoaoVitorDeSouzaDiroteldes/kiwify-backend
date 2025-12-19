@@ -38,6 +38,20 @@ db.exec(`
     error TEXT,
     updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(workspaceId, courseId)
+  );
+`);
+
+// Tabela granular para status de lições (V6)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS lesson_migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lessonId TEXT NOT NULL,
+    courseId TEXT NOT NULL,
+    workspaceId TEXT NOT NULL,
+    processingStatus TEXT DEFAULT 'idle',
+    streamUrl TEXT,
+    updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(workspaceId, courseId, lessonId)
   )
 `);
 
@@ -176,6 +190,71 @@ app.get('/courses/:id/prepare-download', async (req, res) => {
 const sanitize = (s) => s ? s.replace(/[^a-zA-Z0-9]/g, '_') : '';
 
 // Rota para listar a galeria de cursos baixados (Com injeção de URL de GCS e status de migração por aula)
+// Endpoint para limpar a fila e cancelar todos os jobs pendentes/ativos
+app.delete('/queue', async (req, res) => {
+    try {
+        // Pausa a fila
+        await downloadQueue.pause();
+        
+        // Remove jobs de todos os estados
+        // BullMQ clean methods return promises
+        await Promise.all([
+            downloadQueue.clean(0, 0, 'active'),
+            downloadQueue.clean(0, 0, 'wait'),
+            downloadQueue.clean(0, 0, 'delayed'),
+            downloadQueue.clean(0, 0, 'paused'),
+            downloadQueue.clean(0, 0, 'failed')
+        ]);
+        
+        // Remove todos os jobs esperando
+        await downloadQueue.drain();
+        
+        // Atualiza status no banco para 'cancelled' para migrações em andamento
+        const stmt = db.prepare("UPDATE migrations SET status = 'cancelled' WHERE status IN ('downloading', 'pending')");
+        const info = stmt.run();
+        
+        // Marca lições em processamento como erro (canceladas)
+        const stmtLessons = db.prepare("UPDATE lesson_migrations SET processingStatus = 'error' WHERE processingStatus = 'processing'");
+        stmtLessons.run();
+
+        await downloadQueue.resume();
+        
+        console.log(`Fila limpa. ${info.changes} migrações canceladas.`);
+        
+        res.json({ 
+            success: true, 
+            message: 'Fila limpa com sucesso', 
+            cancelledMigrations: info.changes 
+        });
+    } catch (e) {
+        console.error('Erro ao limpar fila:', e);
+        try { await downloadQueue.resume(); } catch {}
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Endpoint para cancelar uma migração específica
+app.delete('/migrations/:workspaceId/:courseId', async (req, res) => {
+    const { workspaceId, courseId } = req.params;
+    try {
+        // Atualiza o status no banco.
+        // Nota: Se o job já estiver rodando no worker, ele pode sobrescrever este status ao terminar.
+        // Para cancelamento real em tempo de execução, seria necessário sinalização via Redis, mas isso requer refatoração do Worker.
+        // Este endpoint serve para parar retentativas ou cancelar pendentes logicamente.
+        
+        const stmt = db.prepare("UPDATE migrations SET status = 'cancelled' WHERE workspaceId = ? AND courseId = ?");
+        const info = stmt.run(workspaceId, courseId);
+        
+        if (info.changes === 0) {
+            return res.status(404).json({ error: 'Migração não encontrada ou já finalizada' });
+        }
+        
+        res.json({ success: true, message: 'Migração marcada como cancelada' });
+    } catch (e) {
+         res.status(500).json({ error: e.message });
+    }
+});
+
 app.get('/gallery', (req, res) => {
   try {
     const BUCKET_NAME = 'kiwify-content-platform';
@@ -189,24 +268,49 @@ app.get('/gallery', (req, res) => {
             try {
                 const courseData = JSON.parse(fs.readFileSync(courseJsonPath, 'utf8'));
                 
-                // URL Base do GCS para este curso
-                const gcsBaseUrl = `https://storage.googleapis.com/${BUCKET_NAME}/${relativePathBase}`;
+                // Extrai workspaceId e courseId para consulta ao banco
+                let workspaceId = null;
+                const pathParts = relativePathBase.split('/');
+                if (pathParts[0] === 'workspaces' && pathParts.length >= 2) {
+                    workspaceId = pathParts[1];
+                }
+
+                // Tenta obter o courseId do JSON (assumindo estrutura padrão da Kiwify)
+                const courseId = courseData.course ? courseData.course.id : (courseData.id || null);
+
+                // Busca status de migração no banco de dados (Fonte da Verdade V6)
+                let migrationMap = new Map();
+                if (courseId && workspaceId) {
+                    try {
+                        const migrations = db.prepare('SELECT lessonId, processingStatus, streamUrl FROM lesson_migrations WHERE courseId = ? AND workspaceId = ?').all(courseId, workspaceId);
+                        migrationMap = new Map(migrations.map(m => [m.lessonId, m]));
+                    } catch (e) {
+                        console.error('Erro ao consultar lesson_migrations:', e);
+                    }
+                }
 
                 // Injeta a URL de stream do GCS e status de migração em cada lição
                 if (courseData.course && courseData.course.modules) {
                     courseData.course.modules.forEach(mod => {
                         if (mod.lessons) {
-                            mod.lessons.forEach((lesson, lessonIndex) => {
-                                const moduleDirName = `${mod.order}_${sanitize(mod.name)}`;
-                                const lessonDirName = `${lessonIndex}_${sanitize(lesson.title)}`;
-                                const lessonLocalPath = path.join(dirPath, moduleDirName, lessonDirName);
+                            mod.lessons.forEach((lesson) => {
+                                // Lógica V6: O banco de dados dita o status
+                                const migrationInfo = migrationMap.get(lesson.id);
                                 
-                                // Verifica se a aula foi migrada com sucesso (presença do .uploaded)
-                                const isMigrated = fs.existsSync(path.join(lessonLocalPath, '.uploaded'));
-                                lesson.isMigrated = isMigrated;
-
-                                if (isMigrated && lesson.video && lesson.video.name) {
-                                    lesson.video.streamUrl = `${gcsBaseUrl}/${moduleDirName}/${lessonDirName}/${lesson.video.name}`;
+                                if (migrationInfo) {
+                                    lesson.processingStatus = migrationInfo.processingStatus;
+                                    lesson.isMigrated = migrationInfo.processingStatus === 'completed' && !!migrationInfo.streamUrl;
+                                    
+                                    if (lesson.video) {
+                                        lesson.video.streamUrl = migrationInfo.streamUrl || null;
+                                    }
+                                } else {
+                                    // Fallback para comportamento legado (apenas se não houver registro no banco)
+                                    // Isso mantém compatibilidade com downloads antigos que não estão na tabela nova
+                                    lesson.processingStatus = 'idle';
+                                    lesson.isMigrated = false;
+                                    // Opcional: Manter lógica antiga de .uploaded aqui se necessário, 
+                                    // mas para V6 a ideia é forçar o uso do banco.
                                 }
                             });
                         }

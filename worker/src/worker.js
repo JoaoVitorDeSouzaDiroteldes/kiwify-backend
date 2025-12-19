@@ -94,6 +94,23 @@ const updateMigrationStatus = (workspaceId, courseId, data) => {
   }
 };
 
+const updateLessonStatus = (workspaceId, courseId, lessonId, status, streamUrl = null) => {
+  if (!workspaceId || !courseId || !lessonId) return;
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO lesson_migrations (workspaceId, courseId, lessonId, processingStatus, streamUrl, updatedAt)
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(workspaceId, courseId, lessonId) DO UPDATE SET
+        processingStatus = excluded.processingStatus,
+        streamUrl = COALESCE(excluded.streamUrl, lesson_migrations.streamUrl),
+        updatedAt = CURRENT_TIMESTAMP
+    `);
+    stmt.run(workspaceId, courseId, lessonId, status, streamUrl);
+  } catch (e) {
+    console.error('Erro ao atualizar status da lição:', e);
+  }
+};
+
 const worker = new Worker('download-queue', async job => {
   const { workspaceId, courseId } = job.data;
   const courseName = job.data.courseName || (job.data.course && job.data.course.name) || 'Curso_Desconhecido';
@@ -159,13 +176,51 @@ const worker = new Worker('download-queue', async job => {
                 : courseNameSafe;
             const remotePrefix = `${courseRemoteDir}/${currentModuleDir}/${previousLessonDir}`;
             
+            // Tenta ler o lesson.json para obter o ID e informações do vídeo
+            let lessonId = null;
+            let videoFileName = null;
+            try {
+                const lessonJsonPath = path.join(lessonPathToUpload, 'lesson.json');
+                if (fs.existsSync(lessonJsonPath)) {
+                    const lessonData = JSON.parse(fs.readFileSync(lessonJsonPath, 'utf8'));
+                    lessonId = lessonData.id;
+                    if (lessonData.video && lessonData.video.name) {
+                        videoFileName = lessonData.video.name;
+                    }
+                }
+            } catch (e) {
+                console.error(`Erro ao ler lesson.json em ${lessonPathToUpload}`, e);
+            }
+
+            if (lessonId) {
+                // Marca como processando antes do upload
+                updateLessonStatus(workspaceId, courseId, lessonId, 'processing');
+            }
+            
             console.log(`[UPLOAD INCREMENTAL] Upload da lição anterior: ${remotePrefix}`);
             uploadFolderToGCS(lessonPathToUpload, remotePrefix)
                 .then(() => {
+                    // Mantemos o arquivo .uploaded para compatibilidade legacy, mas a fonte da verdade agora é o DB
                     fs.writeFileSync(path.join(lessonPathToUpload, '.uploaded'), 'true');
+                    
+                    if (lessonId && videoFileName) {
+                        const streamUrl = `https://storage.googleapis.com/${BUCKET_NAME}/${remotePrefix}/${videoFileName}`;
+                        // ATUALIZAÇÃO ATÔMICA: Status completed e URL final
+                        updateLessonStatus(workspaceId, courseId, lessonId, 'completed', streamUrl);
+                        console.log(`[ATOMIC UPDATE] Lição ${lessonId} marcada como completed com URL: ${streamUrl}`);
+                    } else if (lessonId) {
+                         // Caso não tenha vídeo (apenas arquivos), marcamos como completed sem streamUrl
+                         updateLessonStatus(workspaceId, courseId, lessonId, 'completed');
+                    }
+
                     console.log(`[UPLOAD INCREMENTAL] Sucesso para: ${remotePrefix}`);
                 })
-                .catch(err => console.error(`[UPLOAD INCREMENTAL] Falha para: ${remotePrefix}`, err));
+                .catch(err => {
+                    console.error(`[UPLOAD INCREMENTAL] Falha para: ${remotePrefix}`, err);
+                    if (lessonId) {
+                        updateLessonStatus(workspaceId, courseId, lessonId, 'error');
+                    }
+                });
         }
     };
 
