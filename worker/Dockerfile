@@ -15,7 +15,7 @@ RUN nimble install -y
 RUN nim c -d:release -d:ssl --threads:on src/kiwifyDownload.nim
 
 # --- Estágio Final ---
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
