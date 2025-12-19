@@ -37,8 +37,10 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/config/gcloud/application_default_credentials.json
     volumes:
       - ./downloads:/app/downloads
+      - /home/user/.config/gcloud:/app/config/gcloud:ro
     depends_on:
       - redis
     networks:
